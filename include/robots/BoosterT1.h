@@ -232,10 +232,17 @@ class BoosterT1 : public Robot {
             if (!publishImages) {
                 return;
             }
-            const auto& rgbFrame = rgbCamera->getImage();
-            const auto& depthFrame = depthCamera->getDepth16UC1();
-            std::memcpy(imageBuffer_.data(), rgbFrame.data(), rgbFrame.size());
-            std::memcpy(imageBuffer_.data() + rgbFrame.size(), depthFrame.data(), depthFrame.size());
+            // The GUI thread re-renders far less often than control steps run, and
+            // this copy blocks physics: publish each rendered frame once, straight
+            // from the camera buffers.
+            const uint64_t frame = depthCamera->frameCount();
+            if (frame == lastPublishedFrame_) {
+                return;
+            }
+            lastPublishedFrame_ = frame;
+            const size_t rgbBytes = static_cast<size_t>(rgbCamera->getWidth()) * rgbCamera->getHeight() * 3;
+            rgbCamera->copyImageTo(imageBuffer_.data());
+            depthCamera->copyDepth16UC1To(imageBuffer_.data() + rgbBytes);
             image_writer_.write(imageBuffer_.data(), imageBuffer_.size());
         }
 
@@ -277,6 +284,7 @@ class BoosterT1 : public Robot {
         SharedMemoryWriter<BoosterT1StateMeta> state_writer_;
         SharedMemoryWriter<BoosterT1ImageMeta> image_writer_;
         std::vector<uint8_t> imageBuffer_;  // persistent rgb+depth concat buffer for image_writer_
+        uint64_t lastPublishedFrame_ = ~0ull;  // depthCamera->frameCount() at the last image publish
         SharedMemoryReader<> command_reader_;
 };
 

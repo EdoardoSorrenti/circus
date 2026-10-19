@@ -103,6 +103,12 @@ class CameraRGB : public Sensor {
             return cam;
         }
 
+        // Copies the latest frame into dst (w * h * 3 bytes) without allocating.
+        void copyImageTo(uint8_t* dst) const {
+            std::lock_guard<std::mutex> lock(imageMutex_);
+            std::memcpy(dst, image.data(), image.size());
+        }
+
         std::vector<uint8_t> getImage() const {
             std::lock_guard<std::mutex> lock(imageMutex_);
             return image;

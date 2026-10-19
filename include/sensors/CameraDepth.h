@@ -6,6 +6,9 @@
 #include <QImage>
 #include <QOpenGLFunctions>
 #include <algorithm>
+#include <atomic>
+#include <bit>
+#include <cstring>
 #include <limits>
 #include <msgpack.hpp>
 #include <string>
@@ -116,6 +119,13 @@ class CameraDepth : public Sensor {
 
             // Free temporary scene
             mjv_freeScene(&tempScene);
+
+            ++frames_;
+        }
+
+        // Number of frames rendered so far (the GUI thread renders depth right after RGB, so a new count means both changed).
+        uint64_t frameCount() const {
+            return frames_.load();
         }
 
         void saveImage(const std::string& filename) const {
@@ -134,6 +144,13 @@ class CameraDepth : public Sensor {
         const std::vector<uint16_t>& getDepth() const {
             std::lock_guard<std::mutex> lock(depthMutex_);
             return depth;
+        }
+
+        // Same bytes as getDepth16UC1() (little-endian uint16), copied into dst without allocating.
+        void copyDepth16UC1To(unsigned char* dst) const {
+            static_assert(std::endian::native == std::endian::little, "16UC1 bytes are little-endian");
+            std::lock_guard<std::mutex> lock(depthMutex_);
+            std::memcpy(dst, depth.data(), depth.size() * sizeof(uint16_t));
         }
 
         std::vector<unsigned char> getDepth16UC1() const {
@@ -169,6 +186,7 @@ class CameraDepth : public Sensor {
         double fovy_deg;
         MujocoContext* mujContext;
         mutable std::mutex depthMutex_;
+        std::atomic<uint64_t> frames_{0};
         std::vector<float> depthNormalized;
         std::vector<uint16_t> depth;
         mjvCamera cam{};
