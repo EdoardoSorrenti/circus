@@ -27,7 +27,7 @@ class WebViewer : public QObject {
         // Returns false if the port cannot be opened
         bool listen(int port);
 
-        // Whether the viewport should hand over its next frame: someone is watching and the last frame has been sent
+        // Whether the viewport should hand over its next frame: a browser is watching and the last frame is encoded
         bool wantsFrame() const;
         // A frame read from the viewport: RGB rows, bottom row first, as OpenGL returns them
         void sendFrame(std::vector<unsigned char> rgb, int width, int height);
@@ -36,12 +36,16 @@ class WebViewer : public QObject {
         void onNewConnection();
         void onRequest(QTcpSocket* socket);
         void broadcastFrame(const QByteArray& jpeg);
+        void sendLatestFrame(QTcpSocket* socket);
         void encodeFrames();
         QByteArray stateJson() const;
 
         QTcpServer server_;
-        QList<QTcpSocket*> frameClients_;  // Browsers waiting for the next frame
+        QList<QTcpSocket*> frameClients_;  // Browsers waiting for a frame newer than the latest
+        QByteArray latestFrame_;
+        quint64 latestFrameNumber_ = 0;
         std::chrono::steady_clock::time_point lastFrameTime_;
+        std::chrono::steady_clock::time_point lastFrameRequestTime_;
 
         // Frames are encoded to JPEG on their own thread, one at a time, so the viewport does not wait for it
         std::thread encoder_;

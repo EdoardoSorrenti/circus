@@ -1,13 +1,17 @@
 #include "WebViewer.h"
 
+#include <sys/socket.h>
+
 #include <QBuffer>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkInterface>
+#include <QUrlQuery>
 #include <algorithm>
 #include <iostream>
+#include <utility>
 
 #include "GameController.h"
 
@@ -15,10 +19,16 @@ namespace spqr {
 
 namespace {
 
-// Up to 10 frames a second, at the viewport's own size up to Full HD
-constexpr std::chrono::milliseconds kFrameInterval(100);
+// Up to 15 frames a second, at the viewport's own size up to Full HD
+constexpr std::chrono::milliseconds kFrameInterval(66);
 constexpr int kMaxFrameWidth = 1920;
 constexpr int kJpegQuality = 85;
+// The viewport keeps grabbing frames while a browser has asked for one this recently, so the next is ready when asked
+constexpr std::chrono::seconds kWatchTimeout(2);
+constexpr qint64 kMaxRequestSize = 8192;
+// Sent as one burst, a frame overflows the small buffers of a long path (a VPN from another network), and TCP then
+// slows down for the losses. Paced at this rate it goes through: 4 Mbit/s unpaced, 23 paced, on such a path.
+constexpr unsigned int kMaxPacingRate = 30'000'000 / 8;  // bytes per second
 
 const QByteArray kPage = R"html(<!doctype html>
 <html lang="en">
@@ -50,6 +60,7 @@ const QByteArray kPage = R"html(<!doctype html>
   <span><span class="label">Phase</span> <span id="phase" class="value"></span> <span id="subphase" class="value"></span></span>
   <span><span class="label">Game</span> <span id="game" class="value"></span></span>
   <span><span class="label">Sim</span> <span id="sim" class="value"></span></span>
+  <span><span class="label">Video</span> <span id="fps" class="value"></span></span>
   <span id="penalized"></span>
   <span id="status"></span>
   <button id="restart" title="Put the robots and the ball back at their start positions and start a new game">Reset robots</button>
@@ -66,17 +77,24 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 
 // Each frame is asked for once the previous one is on screen: a slow connection gets fewer frames, never late ones
 async function frames() {
-  let shown = null;
+  let shown = null, frame = 0, count = 0, since = performance.now();
   while (true) {
     try {
-      const response = await fetch('/frame', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+      const response = await fetch('/frame?after=' + frame, {cache: 'no-store', signal: AbortSignal.timeout(5000)});
       if (!response.ok)
         throw new Error(response.status);
+      frame = response.headers.get('X-Frame');
       const url = URL.createObjectURL(await response.blob());
       await new Promise(done => { view.onload = view.onerror = done; view.src = url; });
       if (shown)
         URL.revokeObjectURL(shown);
       shown = url;
+      count++;
+      if (performance.now() - since > 2000) {
+        $('fps').textContent = (count * 1000 / (performance.now() - since)).toFixed(0) + ' fps';
+        count = 0;
+        since = performance.now();
+      }
     } catch (e) {
       await sleep(1000);
     }
@@ -166,7 +184,8 @@ bool WebViewer::listen(int port) {
 }
 
 bool WebViewer::wantsFrame() const {
-    return !frameClients_.isEmpty() && !frameInFlight_ && std::chrono::steady_clock::now() - lastFrameTime_ >= kFrameInterval;
+    const auto now = std::chrono::steady_clock::now();
+    return now - lastFrameRequestTime_ < kWatchTimeout && !frameInFlight_ && now - lastFrameTime_ >= kFrameInterval;
 }
 
 void WebViewer::sendFrame(std::vector<unsigned char> rgb, int width, int height) {
@@ -217,13 +236,23 @@ void WebViewer::encodeFrames() {
 void WebViewer::broadcastFrame(const QByteArray& jpeg) {
     if (jpeg.isEmpty())
         return;
-    for (QTcpSocket* socket : frameClients_)
-        reply(socket, "200 OK", "image/jpeg", jpeg);
-    frameClients_.clear();
+    latestFrame_ = jpeg;
+    ++latestFrameNumber_;
+    for (QTcpSocket* socket : std::exchange(frameClients_, {}))
+        sendLatestFrame(socket);
+}
+
+// Frames go on a connection the browser keeps open (HTTP/1.1 keep-alive): no new connection, and no TCP slow start, per frame
+void WebViewer::sendLatestFrame(QTcpSocket* socket) {
+    socket->write("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: " + QByteArray::number(latestFrame_.size())
+                  + "\r\nCache-Control: no-store\r\nX-Frame: " + QByteArray::number(latestFrameNumber_) + "\r\n\r\n" + latestFrame_);
 }
 
 void WebViewer::onNewConnection() {
     while (QTcpSocket* socket = server_.nextPendingConnection()) {
+#ifdef SO_MAX_PACING_RATE
+        setsockopt(static_cast<int>(socket->socketDescriptor()), SOL_SOCKET, SO_MAX_PACING_RATE, &kMaxPacingRate, sizeof(kMaxPacingRate));
+#endif
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onRequest(socket); });
         connect(socket, &QTcpSocket::disconnected, this, [this, socket] {
             frameClients_.removeOne(socket);
@@ -233,21 +262,38 @@ void WebViewer::onNewConnection() {
 }
 
 void WebViewer::onRequest(QTcpSocket* socket) {
-    // Only the request line matters ("GET /path HTTP/1.1"): browsers send it in the first packet
-    if (!socket->canReadLine()) {
-        if (socket->bytesAvailable() > 8192)
+    if (frameClients_.contains(socket))
+        return;  // Still waiting for its frame
+
+    // A request ends with an empty line, and the ones the page sends carry no body: only the first line matters
+    const qint64 end = socket->peek(kMaxRequestSize).indexOf("\r\n\r\n");
+    if (end < 0) {
+        if (socket->bytesAvailable() > kMaxRequestSize)
             socket->abort();
         return;
     }
-    const QList<QByteArray> request = socket->readLine().trimmed().split(' ');
-    disconnect(socket, &QTcpSocket::readyRead, this, nullptr);  // One request per connection
+    const QByteArray head = socket->read(end + 4);
+    const QList<QByteArray> request = head.left(head.indexOf("\r\n")).split(' ');
+    const QList<QByteArray> target = request.size() >= 2 ? request[1].split('?') : QList<QByteArray>();
+    const QByteArray method = request[0];
+    const QByteArray path = target.isEmpty() ? QByteArray() : target[0];
 
+    // The page says which frame it shows: it gets the latest one if that is newer, the next one otherwise
+    if (method == "GET" && path == "/frame") {
+        lastFrameRequestTime_ = std::chrono::steady_clock::now();
+        const QString shown = QUrlQuery(QString::fromLatin1(target.value(1))).queryItemValue("after");
+        if (!latestFrame_.isEmpty() && shown != QString::number(latestFrameNumber_))
+            sendLatestFrame(socket);
+        else
+            frameClients_.append(socket);
+        return;
+    }
+
+    disconnect(socket, &QTcpSocket::readyRead, this, nullptr);  // The other replies close the connection
     if (request.size() < 2) {
         reply(socket, "400 Bad Request", "text/plain", "Bad request\n");
         return;
     }
-    const QByteArray method = request[0];
-    const QByteArray path = request[1].split('?').first();
     if (method == "POST" && path == "/restart") {
         GameController::instance().requestRestartFromStart();
         reply(socket, "200 OK", "text/plain", "Restarting from the start positions\n");
@@ -257,8 +303,6 @@ void WebViewer::onRequest(QTcpSocket* socket) {
         reply(socket, "200 OK", "text/html; charset=utf-8", kPage);
     } else if (path == "/state") {
         reply(socket, "200 OK", "application/json", stateJson());
-    } else if (path == "/frame") {
-        frameClients_.append(socket);  // Answered with the next frame
     } else {
         reply(socket, "404 Not Found", "text/plain", "Not found\n");
     }
