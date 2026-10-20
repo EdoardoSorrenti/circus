@@ -36,16 +36,13 @@ class WebViewer : public QObject {
         void onNewConnection();
         void onRequest(QTcpSocket* socket);
         void broadcastFrame(const QByteArray& jpeg);
-        void sendLatestFrame(QTcpSocket* socket);
         void encodeFrames();
         QByteArray stateJson() const;
 
         QTcpServer server_;
-        QList<QTcpSocket*> frameClients_;  // Browsers waiting for a frame newer than the latest
-        QByteArray latestFrame_;
-        quint64 latestFrameNumber_ = 0;
+        QList<QTcpSocket*> streamClients_;
+        QByteArray latestFrame_;  // As a part of the stream, for a browser that has just connected
         std::chrono::steady_clock::time_point lastFrameTime_;
-        std::chrono::steady_clock::time_point lastFrameRequestTime_;
 
         // Frames are encoded to JPEG on their own thread, one at a time, so the viewport does not wait for it
         std::thread encoder_;
