@@ -70,6 +70,7 @@ SceneParser::SceneParser(const string& yamlPath) {
         scene.simulationConfig.game.other_subphase_duration = gameNode["other_subphase_duration"].as<int>(30);
         scene.simulationConfig.game.first_kickoff_team = gameNode["first_kickoff_team"].as<string>("red");
         scene.simulationConfig.game.penalty_duration = gameNode["penalty_duration"].as<int>(45);
+        scene.simulationConfig.game.broadcast_game_state = gameNode["broadcast_game_state"].as<bool>(false);
     }
 
     // Field configs are owned by maximus (src/app/config/fields). Resolve them from the

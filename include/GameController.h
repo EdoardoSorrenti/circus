@@ -5,6 +5,7 @@
 #include <string>
 #include <tuple>
 
+#include "GameStateBroadcaster.h"
 #include "MujocoContext.h"
 #include "Team.h"
 #include "robots/Robot.h"
@@ -212,6 +213,15 @@ class GameController {
         int getKickOffSubPhaseDuration() const {
             return kickOffSubPhaseDuration_;
         }
+        std::string getKickOffTeam() const {
+            return kickOffTeam_;
+        }
+        int getPenaltyDuration() const {
+            return penaltyDuration_;
+        }
+        const std::vector<TeamInGame>& getTeamsInGame() const {
+            return teamsInGame_;
+        }
 
         void setPlayingPhaseDuration(int duration) {
             gameDuration_ = duration;
@@ -288,6 +298,10 @@ class GameController {
         int penaltyDuration_ = 45;  // seconds
 
         bool request_mjforward = false;  // Flag to request mj_forward() call in update()
+
+        // Game state sent to the robots (broadcast_game_state)
+        GameStateBroadcaster broadcaster_;
+        double lastBroadcastTime_ = -1.0;  // Sim time of the last packet
 
         // Game state logging
         bool gameStateLogging_ = true;

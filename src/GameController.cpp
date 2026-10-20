@@ -77,6 +77,11 @@ void GameController::configure(const SimulationConfig& config) {
     gameStateLoggingInterval_ = config.game.game_state_logging_interval;
 
     penaltyDuration_ = config.game.penalty_duration;
+
+    if (config.game.broadcast_game_state)
+        broadcaster_.open();
+    else
+        broadcaster_.close();
 }
 
 void GameController::reset() {
@@ -299,6 +304,9 @@ std::string GameController::handleGameSubPhase(std::string subPhase, std::string
         lastBallContactTeam_ = "none";
         kickOffTeam_ = team;
     }
+
+    // update() records the team only for the set plays it detects: record it for the console's ones too
+    currentSubPhaseTeam_ = team;
 
     if (currentSubPhase_ == KICKOFF) {
         handleMoveBall(0.f, 0.f);
@@ -775,6 +783,12 @@ void GameController::update() {
     if (gameStateLogging_ && (simTime_ - lastLogTime_ >= gameStateLoggingInterval_)) {
         logGameState();
         lastLogTime_ = simTime_;
+    }
+
+    // Send the game state to the robots twice a second, as the official GameController does
+    if (broadcaster_.isOpen() && (simTime_ - lastBroadcastTime_ >= 0.5 || simTime_ < lastBroadcastTime_)) {
+        broadcaster_.send(*this);
+        lastBroadcastTime_ = simTime_;
     }
 }
 
