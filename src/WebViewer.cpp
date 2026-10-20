@@ -176,16 +176,23 @@ async function frames() {
   }
 }
 
+// Sim time when a restart was asked: until the new game answers, with its clock started over, the page says so
+let simTime = 0, restartedAt = null;
+
 $('restart').onclick = () => {
   if (!confirm('Restart Circus and its robots from scratch? The page picks the new game up when it is ready.'))
     return;
   fetch('/restart', {method: 'POST'}).catch(() => {});
+  restartedAt = simTime;
   $('status').textContent = 'Restarting Circus';
 };
 
 async function poll() {
   try {
     const s = await (await fetch('/state', {cache: 'no-store'})).json();
+    simTime = s.simTime;
+    if (restartedAt !== null && simTime < restartedAt)
+      restartedAt = null;
     $('red').textContent = s.score[0];
     $('blue').textContent = s.score[1];
     $('phase').textContent = words(s.phase) + ('phaseTimeLeft' in s ? ' ' + clock(s.phaseTimeLeft) : '');
@@ -195,9 +202,9 @@ async function poll() {
     $('sim').textContent = clock(s.simTime);
     $('penalized').textContent = s.penalized.length
       ? 'Penalized: ' + s.penalized.map(p => `${p.team} ${p.number} (${words(p.penalty)}, ${clock(p.timeLeft)})`).join(', ') : '';
-    $('status').textContent = '';
+    $('status').textContent = restartedAt !== null ? 'Restarting Circus' : '';
   } catch (e) {
-    $('status').textContent = 'Circus is not answering';
+    $('status').textContent = restartedAt !== null ? 'Restarting Circus' : 'Circus is not answering';
   }
   setTimeout(poll, 500);
 }
