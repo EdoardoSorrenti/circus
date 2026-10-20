@@ -23,8 +23,8 @@ namespace spqr {
 
 namespace {
 
-// Up to 15 frames a second, at the viewport's own size up to Full HD
-constexpr std::chrono::milliseconds kFrameInterval(66);
+// About every other frame the viewport draws (every 20 ms or so), up to 28 a second, at its own size up to Full HD
+constexpr std::chrono::milliseconds kFrameInterval(35);
 constexpr int kMaxFrameWidth = 1920;
 constexpr int kJpegQuality = 75;
 // Only the tiles that changed are sent, packed in rows of one JPEG: a game changes a few percent of the picture per frame
