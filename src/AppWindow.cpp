@@ -50,6 +50,18 @@ AppWindow::AppWindow(int& argc, char** argv) : QMainWindow() {
             connectMode_ = argv[++i];  // TODO: forse si può aggiungere come variabile d'ambiente??
         else if (arg == "--no-images")
             publishImages_ = false;
+        else if (arg == "--web") {
+            webPort_ = 8080;
+            const std::string port = (i + 1 < argc) ? argv[i + 1] : "";
+            if (!port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos)
+                webPort_ = std::stoi(argv[++i]);
+        }
+    }
+
+    if (webPort_ > 0) {
+        webViewer = std::make_unique<WebViewer>();
+        if (!webViewer->listen(webPort_))
+            webViewer.reset();
     }
 
     resize(spqr::initialWindowWidth, spqr::initialWindowHeight);
@@ -153,6 +165,7 @@ void AppWindow::loadScene(const QString& yaml_file) {
 
         mujContext = std::make_unique<MujocoContext>(xmlScene);
         viewport = std::make_unique<SimulationViewport>(*mujContext);
+        viewport->setWebViewer(webViewer.get());
 
         // Configure and bind GameController
         GameController::instance().configure(parser.getSceneInfo().simulationConfig);

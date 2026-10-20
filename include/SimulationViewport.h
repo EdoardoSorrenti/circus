@@ -9,6 +9,7 @@
 
 #include "Constants.h"
 #include "MujocoContext.h"
+#include "WebViewer.h"
 namespace spqr {
 
 class SimulationViewport : public QOpenGLWindow {
@@ -25,6 +26,11 @@ class SimulationViewport : public QOpenGLWindow {
             if (timer) {
                 timer->start(16);
             }
+        }
+
+        // Where to send the view for the browsers watching it (--web)
+        void setWebViewer(WebViewer* viewer) {
+            webViewer = viewer;
         }
 
     protected:
@@ -50,6 +56,7 @@ class SimulationViewport : public QOpenGLWindow {
         mjrContext* context;
         QTimer* timer;
         mjvPerturb pert;
+        WebViewer* webViewer = nullptr;
 
         /**
          * @brief Selects a body in the simulation based on relative x and y coordinates.

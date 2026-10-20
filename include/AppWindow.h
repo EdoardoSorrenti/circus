@@ -18,6 +18,7 @@
 #include "MujocoContext.h"
 #include "SimulationThread.h"
 #include "SimulationViewport.h"
+#include "WebViewer.h"
 #include "frontend/game_controller_panel_column/GameControllerPanelColumnContainer.h"
 #include "frontend/game_controller_panel_header/GameControllerPanelHeaderContainer.h"
 #include "frontend/tools_panel/ToolsPanel.h"
@@ -51,6 +52,7 @@ class AppWindow : public QMainWindow {
         GameControllerPanelHeaderContainer* gameControllerPanelHeaderContainer = nullptr;
         ToolsPanel* toolsPanel = nullptr;
 
+        std::unique_ptr<WebViewer> webViewer;  // Before the viewport, which sends it frames
         std::unique_ptr<MujocoContext> mujContext;
         std::unique_ptr<SimulationViewport> viewport;
         std::unique_ptr<SimulationThread> sim;
@@ -59,6 +61,7 @@ class AppWindow : public QMainWindow {
         std::string pathsConfigPath_ = spqr::pathsConfigPath;
         std::string connectMode_ = "shm";
         bool publishImages_ = true;  // false with --no-images
+        int webPort_ = 0;            // set by --web [PORT]
 };
 
 }  // namespace spqr

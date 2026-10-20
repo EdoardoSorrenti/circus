@@ -48,6 +48,13 @@ void SimulationViewport::paintGL() {
     mjv_updateScene(model, data, opt, nullptr, cam, mjCAT_ALL, scene);
     mjr_render(viewport, scene, context);
 
+    // Send the view to the browsers watching it (--web)
+    if (webViewer && webViewer->wantsFrame()) {
+        std::vector<unsigned char> rgb(3 * width * height);
+        mjr_readPixels(rgb.data(), nullptr, viewport, context);
+        webViewer->sendFrame(std::move(rgb), width, height);
+    }
+
     // Render cameras offscreen and save images
     for (int i = 0; i < RobotManager::instance().getRobots().size(); ++i) {
         auto robot = RobotManager::instance().getRobots()[i];
