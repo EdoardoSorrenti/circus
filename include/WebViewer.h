@@ -14,7 +14,7 @@
 
 namespace spqr {
 
-// A web page that shows the simulation (--web [PORT]): the viewport as an MJPEG stream and the game state, so a
+// A web page that shows the simulation (--web [PORT]): the viewport as JPEG frames and the game state, so a
 // browser on another computer can follow Circus without seeing its screen. Its one control puts the robots back at
 // their start positions for a new game (POST /restart).
 class WebViewer : public QObject {
@@ -40,7 +40,7 @@ class WebViewer : public QObject {
         QByteArray stateJson() const;
 
         QTcpServer server_;
-        QList<QTcpSocket*> streamClients_;
+        QList<QTcpSocket*> frameClients_;  // Browsers waiting for the next frame
         std::chrono::steady_clock::time_point lastFrameTime_;
 
         // Frames are encoded to JPEG on their own thread, one at a time, so the viewport does not wait for it

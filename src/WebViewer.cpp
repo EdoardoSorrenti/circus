@@ -15,12 +15,10 @@ namespace spqr {
 
 namespace {
 
-// Enough to follow a game, light on the viewport and on the network
+// Up to 10 frames a second, at the viewport's own size up to Full HD
 constexpr std::chrono::milliseconds kFrameInterval(100);
-constexpr int kMaxFrameWidth = 1280;
-constexpr int kJpegQuality = 75;
-// A small send buffer keeps a slow connection a frame or two behind, not seconds
-constexpr int kStreamSendBuffer = 256 * 1024;
+constexpr int kMaxFrameWidth = 1920;
+constexpr int kJpegQuality = 85;
 
 const QByteArray kPage = R"html(<!doctype html>
 <html lang="en">
@@ -64,10 +62,26 @@ const words = s => s.toLowerCase().replaceAll('_', ' ');
 const SUBPHASES = {KICKOFF: 'kick-off', KICKIN: 'kick-in', CORNERKICK: 'corner kick', GOALKICK: 'goal kick',
                    PENALTYKICK: 'penalty kick', PUSHINGFREEKICK: 'pushing free kick'};
 const view = $('view');
-let online = false;
+const sleep = ms => new Promise(done => setTimeout(done, ms));
 
-function watch() { view.src = '/stream?' + Date.now(); }
-view.onerror = () => setTimeout(watch, 2000);
+// Each frame is asked for once the previous one is on screen: a slow connection gets fewer frames, never late ones
+async function frames() {
+  let shown = null;
+  while (true) {
+    try {
+      const response = await fetch('/frame', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+      if (!response.ok)
+        throw new Error(response.status);
+      const url = URL.createObjectURL(await response.blob());
+      await new Promise(done => { view.onload = view.onerror = done; view.src = url; });
+      if (shown)
+        URL.revokeObjectURL(shown);
+      shown = url;
+    } catch (e) {
+      await sleep(1000);
+    }
+  }
+}
 
 $('restart').onclick = () => {
   if (confirm('Put the robots and the ball back at their start positions and start a new game?'))
@@ -87,16 +101,13 @@ async function poll() {
     $('penalized').textContent = s.penalized.length
       ? 'Penalized: ' + s.penalized.map(p => `${p.team} ${p.number} (${words(p.penalty)}, ${clock(p.timeLeft)})`).join(', ') : '';
     $('status').textContent = '';
-    if (!online)
-      watch();  // Circus has just come up: (re)open the stream
-    online = true;
   } catch (e) {
     $('status').textContent = 'Circus is not answering';
-    online = false;
   }
   setTimeout(poll, 500);
 }
 poll();
+frames();
 </script>
 </body>
 </html>
@@ -155,7 +166,7 @@ bool WebViewer::listen(int port) {
 }
 
 bool WebViewer::wantsFrame() const {
-    return !streamClients_.isEmpty() && !frameInFlight_ && std::chrono::steady_clock::now() - lastFrameTime_ >= kFrameInterval;
+    return !frameClients_.isEmpty() && !frameInFlight_ && std::chrono::steady_clock::now() - lastFrameTime_ >= kFrameInterval;
 }
 
 void WebViewer::sendFrame(std::vector<unsigned char> rgb, int width, int height) {
@@ -206,19 +217,16 @@ void WebViewer::encodeFrames() {
 void WebViewer::broadcastFrame(const QByteArray& jpeg) {
     if (jpeg.isEmpty())
         return;
-    const QByteArray part = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + QByteArray::number(jpeg.size()) + "\r\n\r\n" + jpeg + "\r\n";
-    for (QTcpSocket* socket : streamClients_) {
-        // A browser still busy with the previous frame skips this one
-        if (socket->bytesToWrite() == 0)
-            socket->write(part);
-    }
+    for (QTcpSocket* socket : frameClients_)
+        reply(socket, "200 OK", "image/jpeg", jpeg);
+    frameClients_.clear();
 }
 
 void WebViewer::onNewConnection() {
     while (QTcpSocket* socket = server_.nextPendingConnection()) {
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onRequest(socket); });
         connect(socket, &QTcpSocket::disconnected, this, [this, socket] {
-            streamClients_.removeOne(socket);
+            frameClients_.removeOne(socket);
             socket->deleteLater();
         });
     }
@@ -249,10 +257,8 @@ void WebViewer::onRequest(QTcpSocket* socket) {
         reply(socket, "200 OK", "text/html; charset=utf-8", kPage);
     } else if (path == "/state") {
         reply(socket, "200 OK", "application/json", stateJson());
-    } else if (path == "/stream") {
-        socket->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, kStreamSendBuffer);
-        socket->write("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store\r\n\r\n");
-        streamClients_.append(socket);
+    } else if (path == "/frame") {
+        frameClients_.append(socket);  // Answered with the next frame
     } else {
         reply(socket, "404 Not Found", "text/plain", "Not found\n");
     }
