@@ -32,6 +32,9 @@ constexpr int kTileSize = 64;  // A multiple of JPEG's 16 x 16 blocks, so tiles 
 constexpr int kAtlasColumns = 16;
 // A stream that shows a still picture gets an empty update this often, so the page knows it is alive
 constexpr std::chrono::seconds kKeepAlive(2);
+// A stream takes the next update while less than this is still unsent on it: about one update in line, so the next one
+// is not skipped just because the previous is still being paced out, yet the picture stays about an update behind at most
+constexpr int kMaxBacklog = 64 * 1024;
 constexpr qint64 kMaxRequestSize = 8192;
 // Sent as one burst, a frame overflows the small buffers of a long path (a VPN from another network), and TCP then
 // slows down for the losses. Paced at this rate it goes through: 4 Mbit/s unpaced, 23 paced, on such a path.
@@ -231,17 +234,16 @@ QByteArray streamPart(const QByteArray& tiles, const QByteArray& jpeg) {
            + "\r\n";
 }
 
-// Whether all that was written on a stream has left this computer: a new frame then goes out at once, and one that would
-// queue behind older ones waits for the next, which then brings the tiles of both
-bool hasSentAll(QTcpSocket* socket) {
-    if (socket->bytesToWrite() > 0)
-        return false;
+// Whether a stream can take another update now: one that would wait behind too much waits for the next, which then brings
+// the tiles of both, so a slow link gets fewer updates, never late ones
+bool hasRoom(QTcpSocket* socket) {
+    qint64 unsent = socket->bytesToWrite();
 #ifdef SIOCOUTQNSD
-    int unsent = 0;
-    if (ioctl(static_cast<int>(socket->socketDescriptor()), SIOCOUTQNSD, &unsent) == 0)
-        return unsent == 0;
+    int unsentByKernel = 0;
+    if (ioctl(static_cast<int>(socket->socketDescriptor()), SIOCOUTQNSD, &unsentByKernel) == 0)
+        unsent += unsentByKernel;
 #endif
-    return true;
+    return unsent < kMaxBacklog;
 }
 
 void reply(QTcpSocket* socket, const QByteArray& status, const QByteArray& contentType, const QByteArray& body) {
@@ -368,7 +370,7 @@ void WebViewer::newFrame(const QImage& image, const std::vector<int>& changedTil
     const auto now = std::chrono::steady_clock::now();
     QHash<quint64, QByteArray> updates;  // Browsers in step get the same update
     for (StreamClient& client : streamClients_) {
-        if (!hasSentAll(client.socket))
+        if (!hasRoom(client.socket))
             continue;
         if (client.frame < latestFrameNumber_) {
             if (!updates.contains(client.frame))
