@@ -7,16 +7,19 @@
 #endif
 
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QHash>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkInterface>
+#include <QTimer>
 #include <algorithm>
 #include <cstring>
 #include <iostream>
 
+#include "Constants.h"
 #include "GameController.h"
 
 namespace spqr {
@@ -73,7 +76,7 @@ const QByteArray kPage = R"html(<!doctype html>
   <span><span class="label">Video</span> <span id="fps" class="value"></span></span>
   <span id="penalized"></span>
   <span id="status"></span>
-  <button id="restart" title="Put the robots and the ball back at their start positions and start a new game">Reset robots</button>
+  <button id="restart" title="Restart Circus and its robots from scratch, as if launched again">Restart game</button>
 </header>
 <main><canvas id="view"></canvas></main>
 <script>
@@ -174,8 +177,10 @@ async function frames() {
 }
 
 $('restart').onclick = () => {
-  if (confirm('Put the robots and the ball back at their start positions and start a new game?'))
-    fetch('/restart', {method: 'POST'}).catch(() => {});
+  if (!confirm('Restart Circus and its robots from scratch? The page picks the new game up when it is ready.'))
+    return;
+  fetch('/restart', {method: 'POST'}).catch(() => {});
+  $('status').textContent = 'Restarting Circus';
 };
 
 async function poll() {
@@ -453,8 +458,9 @@ void WebViewer::onRequest(QTcpSocket* socket) {
         return;
     }
     if (method == "POST" && path == "/restart") {
-        GameController::instance().requestRestartFromStart();
-        reply(socket, "200 OK", "text/plain", "Restarting from the start positions\n");
+        reply(socket, "200 OK", "text/plain", "Restarting Circus\n");
+        // main() starts Circus again once it has shut down; the reply goes out first
+        QTimer::singleShot(200, [] { QCoreApplication::exit(restartExitCode); });
     } else if (method != "GET") {
         reply(socket, "405 Method Not Allowed", "text/plain", "Only GET, and POST /restart\n");
     } else if (path == "/") {

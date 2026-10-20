@@ -148,7 +148,7 @@ void GameStateBroadcaster::send(const GameController& gc) {
     packet.gamePhase = GAME_PHASE_NORMAL;
     packet.state = toGcState(gc.getCurrentPhase());
     packet.setPlay = toGcSetPlay(gc.getCurrentSubPhase());
-    packet.firstHalf = gc.isFirstHalf() ? 1 : 0;
+    packet.firstHalf = 1;  // Circus plays a single half
     packet.secsRemaining = clampTo<int16_t>(gc.getGameDuration() - gc.getGameElapsedTime());
     packet.secondaryTime = clampTo<int16_t>(std::max(0.0, secondaryTime(gc)));
 

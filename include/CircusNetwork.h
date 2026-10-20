@@ -59,15 +59,21 @@ class CircusNetwork {
         CircusNetwork(const std::string& sockPath = "/var/run/docker.sock") : curlClient(sockPath){};
 
         ~CircusNetwork() {
-            if (isUp()) {
-                curlClient.request(DELETE, remove_network_endpoint(networkId), DELETE_OK_RESPONSE);
-            }
+            remove();
         };
 
         std::string networkId = "";
         CURLClient curlClient;
 
     public:
+        // Removes the network, which the destructor would do at exit: before Circus starts again in the same process
+        void remove() {
+            if (isUp()) {
+                curlClient.request(DELETE, remove_network_endpoint(networkId), DELETE_OK_RESPONSE);
+                networkId.clear();
+            }
+        }
+
         CircusNetwork(CircusNetwork const&) = delete;
         void operator=(CircusNetwork const&) = delete;
 };

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <map>
 #include <string>
 #include <tuple>
@@ -174,12 +173,6 @@ class GameController {
         void configure(const SimulationConfig& config);
         void reset();
 
-        // Stops the game, puts the robots and the ball back as the scene starts them and starts a new game, from the
-        // next update() on the simulation thread: callable from any thread
-        void requestRestartFromStart() {
-            restartFromStartRequested_ = true;
-        }
-
         GamePhase getCurrentPhase() const {
             return currentPhase_;
         }
@@ -229,9 +222,6 @@ class GameController {
         const std::vector<TeamInGame>& getTeamsInGame() const {
             return teamsInGame_;
         }
-        bool isFirstHalf() const {
-            return firstHalf_;
-        }
 
         void setPlayingPhaseDuration(int duration) {
             gameDuration_ = duration;
@@ -271,8 +261,6 @@ class GameController {
 
     private:
         GameController() = default;
-        void restartFromStart();
-        void placeAtStart();
         ~GameController() = default;
         GameController(const GameController&) = delete;
         GameController& operator=(const GameController&) = delete;
@@ -310,11 +298,6 @@ class GameController {
         int penaltyDuration_ = 45;  // seconds
 
         bool request_mjforward = false;  // Flag to request mj_forward() call in update()
-
-        std::atomic<bool> restartFromStartRequested_{false};
-        static constexpr double kStopBeforePlacing = 2.0;  // seconds: robots need about one to stop walking
-        double placeAtStartTime_ = -1.0;                   // Sim time to put robots and ball back at the start, -1 if none
-        bool firstHalf_ = true;                            // A game restarted from the start positions is a second half, as after half-time
 
         // Game state sent to the robots (broadcast_game_state)
         GameStateBroadcaster broadcaster_;
