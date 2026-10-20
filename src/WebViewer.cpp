@@ -7,12 +7,14 @@
 #endif
 
 #include <QBuffer>
+#include <QHash>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkInterface>
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 
 #include "GameController.h"
@@ -25,6 +27,11 @@ namespace {
 constexpr std::chrono::milliseconds kFrameInterval(66);
 constexpr int kMaxFrameWidth = 1920;
 constexpr int kJpegQuality = 75;
+// Only the tiles that changed are sent, packed in rows of one JPEG: a game changes a few percent of the picture per frame
+constexpr int kTileSize = 64;  // A multiple of JPEG's 16 x 16 blocks, so tiles are encoded alone
+constexpr int kAtlasColumns = 16;
+// A stream that shows a still picture gets an empty update this often, so the page knows it is alive
+constexpr std::chrono::seconds kKeepAlive(2);
 constexpr qint64 kMaxRequestSize = 8192;
 // Sent as one burst, a frame overflows the small buffers of a long path (a VPN from another network), and TCP then
 // slows down for the losses. Paced at this rate it goes through: 4 Mbit/s unpaced, 23 paced, on such a path.
@@ -65,7 +72,7 @@ const QByteArray kPage = R"html(<!doctype html>
   <span id="status"></span>
   <button id="restart" title="Put the robots and the ball back at their start positions and start a new game">Reset robots</button>
 </header>
-<main><img id="view" alt=""></main>
+<main><canvas id="view"></canvas></main>
 <script>
 const $ = id => document.getElementById(id);
 const clock = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
@@ -73,6 +80,7 @@ const words = s => s.toLowerCase().replaceAll('_', ' ');
 const SUBPHASES = {KICKOFF: 'kick-off', KICKIN: 'kick-in', CORNERKICK: 'corner kick', GOALKICK: 'goal kick',
                    PENALTYKICK: 'penalty kick', PUSHINGFREEKICK: 'pushing free kick'};
 const view = $('view');
+const context = view.getContext('2d');
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
 // Index of the first empty line ("\r\n\r\n") in bytes, -1 if none
@@ -83,17 +91,36 @@ function headerEnd(bytes) {
   return -1;
 }
 
-// The frames come on one long response, each as soon as the previous one has left Circus:
-// the connection never waits for the page, and a slow one gets fewer frames, never late ones. If they stop, the page
-// connects again.
+// Draws an update: the whole frame, or tiles packed in rows of the image, listed by their index in the frame
+function draw(image, tiles, size) {
+  if (tiles === 'full') {
+    if (view.width !== image.width || view.height !== image.height) {
+      view.width = image.width;
+      view.height = image.height;
+    }
+    context.drawImage(image, 0, 0);
+  } else {
+    const columns = image.width / size, perRow = Math.ceil(view.width / size);
+    tiles.split(',').forEach((tile, k) => context.drawImage(image, (k % columns) * size, Math.floor(k / columns) * size, size, size,
+                                                            (tile % perRow) * size, Math.floor(tile / perRow) * size, size, size));
+  }
+  image.close();
+}
+
+// The updates come on one long response, each as soon as the previous one has left Circus: the connection never waits
+// for the page, and a slow one gets fewer updates, never late ones. If they stop, the page connects again.
 async function frames() {
-  let shown = null, count = 0, since = performance.now();
+  let count = 0, since = performance.now(), streams = 0;
   while (true) {
+    const stream = ++streams;  // Updates still on their way from a stream that was dropped are not drawn
     const abort = new AbortController();
     let watchdog = setTimeout(() => abort.abort(), 5000);
+    let drawn = Promise.resolve();
     try {
-      const reader = (await fetch('/stream', {cache: 'no-store', signal: abort.signal})).body.getReader();
-      let buffer = new Uint8Array(0), start = 0, length = -1;
+      const response = await fetch('/stream', {cache: 'no-store', signal: abort.signal});
+      const tileSize = Number(response.headers.get('X-Tile-Size'));
+      const reader = response.body.getReader();
+      let buffer = new Uint8Array(0), start = 0, length = -1, tiles = '';
       while (true) {
         const {value, done} = await reader.read();
         if (done)
@@ -103,26 +130,30 @@ async function frames() {
         joined.set(value, buffer.length);
         buffer = joined;
         while (true) {
-          // A part: "--frame", its type and "Content-Length: N", an empty line, then the N bytes of the JPEG
+          // A part: "--frame", its type, "Content-Length: N" and "X-Tiles", an empty line, then the N bytes of the JPEG
           if (length < 0) {
             const end = headerEnd(buffer);
             if (end < 0)
               break;
-            length = Number(/Content-Length: (\d+)/.exec(new TextDecoder().decode(buffer.subarray(0, end)))[1]);
+            const header = new TextDecoder().decode(buffer.subarray(0, end));
+            length = Number(/Content-Length: (\d+)/.exec(header)[1]);
+            tiles = /X-Tiles: ([^\r\n]*)/.exec(header)[1];
             start = end + 4;
           }
           if (buffer.length < start + length)
             break;
-          const url = URL.createObjectURL(new Blob([buffer.subarray(start, start + length)], {type: 'image/jpeg'}));
-          view.src = url;
-          if (shown)
-            URL.revokeObjectURL(shown);
-          shown = url;
-          buffer = buffer.slice(start + length);
-          length = -1;
           clearTimeout(watchdog);
           watchdog = setTimeout(() => abort.abort(), 5000);
-          count++;
+          if (tiles !== 'none') {
+            // Each update builds on the ones before: they are drawn in order, and a broken one starts the stream over
+            const jpeg = new Blob([buffer.subarray(start, start + length)], {type: 'image/jpeg'}), update = tiles;
+            drawn = drawn.then(() => createImageBitmap(jpeg))
+                         .then(image => stream === streams ? draw(image, update, tileSize) : image.close())
+                         .catch(() => abort.abort());
+            count++;
+          }
+          buffer = buffer.slice(start + length);
+          length = -1;
           if (performance.now() - since > 2000) {
             $('fps').textContent = (count * 1000 / (performance.now() - since)).toFixed(0) + ' fps';
             count = 0;
@@ -169,8 +200,39 @@ frames();
 </html>
 )html";
 
+QByteArray toJpeg(const QImage& image) {
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "JPEG", kJpegQuality);
+    return jpeg;
+}
+
+int tileColumns(const QImage& image) {
+    return (image.width() + kTileSize - 1) / kTileSize;
+}
+
+int tileCount(const QImage& image) {
+    return tileColumns(image) * ((image.height() + kTileSize - 1) / kTileSize);
+}
+
+bool tileDiffers(const QImage& a, const QImage& b, int tile) {
+    const int x = (tile % tileColumns(a)) * kTileSize;
+    const int y = (tile / tileColumns(a)) * kTileSize;
+    const int bytes = (std::min(x + kTileSize, a.width()) - x) * a.depth() / 8;
+    for (int row = y; row < std::min(y + kTileSize, a.height()); ++row)
+        if (std::memcmp(a.constScanLine(row) + x * a.depth() / 8, b.constScanLine(row) + x * b.depth() / 8, bytes) != 0)
+            return true;
+    return false;
+}
+
+QByteArray streamPart(const QByteArray& tiles, const QByteArray& jpeg) {
+    return "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + QByteArray::number(jpeg.size()) + "\r\nX-Tiles: " + tiles + "\r\n\r\n" + jpeg
+           + "\r\n";
+}
+
 // Whether all that was written on a stream has left this computer: a new frame then goes out at once, and one that would
-// queue behind older ones is skipped
+// queue behind older ones waits for the next, which then brings the tiles of both
 bool hasSentAll(QTcpSocket* socket) {
     if (socket->bytesToWrite() > 0)
         return false;
@@ -200,8 +262,8 @@ WebViewer::~WebViewer() {
         stopping_ = true;
     }
     frameReady_.notify_one();
-    if (encoder_.joinable())
-        encoder_.join();
+    if (worker_.joinable())
+        worker_.join();
 
     // The sockets go with the server: they must not call back into this half-destroyed object
     for (QTcpSocket* socket : server_.findChildren<QTcpSocket*>())
@@ -217,7 +279,7 @@ bool WebViewer::listen(int port) {
         std::cerr << "Web viewer: cannot listen on port " << port << ": " << server_.errorString().toStdString() << std::endl;
         return false;
     }
-    encoder_ = std::thread(&WebViewer::encodeFrames, this);
+    worker_ = std::thread(&WebViewer::processFrames, this);
 
     std::cout << "Web viewer: open http://localhost:" << port << " here";
     for (const QNetworkInterface& interface : QNetworkInterface::allInterfaces()) {
@@ -250,7 +312,8 @@ void WebViewer::sendFrame(std::vector<unsigned char> rgb, int width, int height)
     frameReady_.notify_one();
 }
 
-void WebViewer::encodeFrames() {
+void WebViewer::processFrames() {
+    QImage previous;
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
         frameReady_.wait(lock, [this] { return stopping_ || !frame_.empty(); });
@@ -266,16 +329,24 @@ void WebViewer::encodeFrames() {
         QImage image = QImage(rgb.data(), width, height, 3 * width, QImage::Format_RGB888).flipped(Qt::Vertical);
         if (image.width() > kMaxFrameWidth)
             image = image.scaledToWidth(kMaxFrameWidth, Qt::SmoothTransformation);
-        QByteArray jpeg;
-        QBuffer buffer(&jpeg);
-        buffer.open(QIODevice::WriteOnly);
-        image.save(&buffer, "JPEG", kJpegQuality);
+
+        // The tiles that differ from the previous frame: all of them when the size changes
+        std::vector<int> changed;
+        for (int tile = 0; tile < tileCount(image); ++tile)
+            if (previous.size() != image.size() || tileDiffers(image, previous, tile))
+                changed.push_back(tile);
+        previous = image;
+
+        // Most of the picture changed (the camera moved): the browsers will get it whole, encoded here, off the GUI thread
+        QByteArray fullJpeg;
+        if (2 * static_cast<int>(changed.size()) > tileCount(image))
+            fullJpeg = toJpeg(image);
 
         // The sockets belong to the GUI thread
         QMetaObject::invokeMethod(
             this,
-            [this, jpeg] {
-                broadcastFrame(jpeg);
+            [this, image, changed, fullJpeg] {
+                newFrame(image, changed, fullJpeg);
                 frameInFlight_ = false;
             },
             Qt::QueuedConnection);
@@ -283,13 +354,68 @@ void WebViewer::encodeFrames() {
     }
 }
 
-void WebViewer::broadcastFrame(const QByteArray& jpeg) {
-    if (jpeg.isEmpty())
-        return;
-    latestFrame_ = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + QByteArray::number(jpeg.size()) + "\r\n\r\n" + jpeg + "\r\n";
-    for (QTcpSocket* socket : streamClients_)
-        if (hasSentAll(socket))
-            socket->write(latestFrame_);
+void WebViewer::newFrame(const QImage& image, const std::vector<int>& changedTiles, const QByteArray& fullJpeg) {
+    if (!changedTiles.empty()) {
+        ++latestFrameNumber_;
+        if (image.size() != latestImage_.size())
+            tileChanged_.assign(tileCount(image), latestFrameNumber_);
+        for (int tile : changedTiles)
+            tileChanged_[tile] = latestFrameNumber_;
+        latestImage_ = image;
+        latestFullJpeg_ = fullJpeg;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    QHash<quint64, QByteArray> updates;  // Browsers in step get the same update
+    for (StreamClient& client : streamClients_) {
+        if (!hasSentAll(client.socket))
+            continue;
+        if (client.frame < latestFrameNumber_) {
+            if (!updates.contains(client.frame))
+                updates.insert(client.frame, updateSince(client.frame));
+            client.socket->write(updates.value(client.frame));
+            client.frame = latestFrameNumber_;
+            client.lastWrite = now;
+        } else if (now - client.lastWrite >= kKeepAlive) {
+            client.socket->write(streamPart("none", QByteArray()));
+            client.lastWrite = now;
+        }
+    }
+}
+
+// What brings a browser from frame `frame` to the latest one: the tiles changed since, packed in rows of one JPEG, or the
+// whole frame for a browser that has none yet or when most tiles changed
+QByteArray WebViewer::updateSince(quint64 frame) {
+    std::vector<int> tiles;
+    for (int tile = 0; frame > 0 && tile < static_cast<int>(tileChanged_.size()); ++tile)
+        if (tileChanged_[tile] > frame)
+            tiles.push_back(tile);
+    if (frame == 0 || 2 * tiles.size() > tileChanged_.size()) {
+        if (latestFullJpeg_.isEmpty())
+            latestFullJpeg_ = toJpeg(latestImage_);
+        return streamPart("full", latestFullJpeg_);
+    }
+
+    const int columns = tileColumns(latestImage_);
+    const int bytesPerPixel = latestImage_.depth() / 8;
+    const int atlasColumns = std::min(static_cast<int>(tiles.size()), kAtlasColumns);
+    const int atlasRows = (static_cast<int>(tiles.size()) + atlasColumns - 1) / atlasColumns;
+    QImage atlas(atlasColumns * kTileSize, atlasRows * kTileSize, latestImage_.format());
+    atlas.fill(Qt::black);
+    QByteArray list;
+    for (int k = 0; k < static_cast<int>(tiles.size()); ++k) {
+        const int x = (tiles[k] % columns) * kTileSize;
+        const int y = (tiles[k] / columns) * kTileSize;
+        const int atlasX = (k % atlasColumns) * kTileSize;
+        const int atlasY = (k / atlasColumns) * kTileSize;
+        const int bytes = (std::min(x + kTileSize, latestImage_.width()) - x) * bytesPerPixel;
+        for (int row = 0; row < std::min(kTileSize, latestImage_.height() - y); ++row)
+            std::memcpy(atlas.scanLine(atlasY + row) + atlasX * bytesPerPixel, latestImage_.constScanLine(y + row) + x * bytesPerPixel, bytes);
+        if (k > 0)
+            list += ',';
+        list += QByteArray::number(tiles[k]);
+    }
+    return streamPart(list, toJpeg(atlas));
 }
 
 void WebViewer::onNewConnection() {
@@ -299,7 +425,7 @@ void WebViewer::onNewConnection() {
 #endif
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onRequest(socket); });
         connect(socket, &QTcpSocket::disconnected, this, [this, socket] {
-            streamClients_.removeOne(socket);
+            streamClients_.removeIf([socket](const StreamClient& client) { return client.socket == socket; });
             socket->deleteLater();
         });
     }
@@ -336,9 +462,15 @@ void WebViewer::onRequest(QTcpSocket* socket) {
     } else if (path == "/stream") {
         // Plain bytes for the page to split: Safari would split a multipart/x-mixed-replace response itself, out of the page's reach
         socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-Content-Type-Options: nosniff\r\n"
-                      "Cache-Control: no-store\r\n\r\n"
-                      + latestFrame_);
-        streamClients_.append(socket);
+                      "Cache-Control: no-store\r\nX-Tile-Size: "
+                      + QByteArray::number(kTileSize) + "\r\n\r\n");
+        StreamClient client{socket};
+        if (!latestImage_.isNull()) {
+            client.socket->write(updateSince(0));
+            client.frame = latestFrameNumber_;
+        }
+        client.lastWrite = std::chrono::steady_clock::now();
+        streamClients_.append(client);
     } else {
         reply(socket, "404 Not Found", "text/plain", "Not found\n");
     }
