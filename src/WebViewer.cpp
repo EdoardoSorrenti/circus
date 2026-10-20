@@ -40,6 +40,8 @@ const QByteArray kPage = R"html(<!doctype html>
   .red { background: #993546; }
   .blue { background: #108296; }
   #status { color: #e0a040; }
+  button { margin-left: auto; padding: 4px 12px; border: 1px solid #666; border-radius: 3px; background: #444; color: #fff; font: inherit; cursor: pointer; }
+  button:hover { background: #555; }
   main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
   #view { max-width: 100%; max-height: 100%; }
 </style>
@@ -52,6 +54,7 @@ const QByteArray kPage = R"html(<!doctype html>
   <span><span class="label">Sim</span> <span id="sim" class="value"></span></span>
   <span id="penalized"></span>
   <span id="status"></span>
+  <button id="restart" title="Put the robots and the ball back at their start positions and start a new game">Reset robots</button>
 </header>
 <main><img id="view" alt=""></main>
 <script>
@@ -65,6 +68,11 @@ let online = false;
 
 function watch() { view.src = '/stream?' + Date.now(); }
 view.onerror = () => setTimeout(watch, 2000);
+
+$('restart').onclick = () => {
+  if (confirm('Put the robots and the ball back at their start positions and start a new game?'))
+    fetch('/restart', {method: 'POST'}).catch(() => {});
+};
 
 async function poll() {
   try {
@@ -226,12 +234,18 @@ void WebViewer::onRequest(QTcpSocket* socket) {
     const QList<QByteArray> request = socket->readLine().trimmed().split(' ');
     disconnect(socket, &QTcpSocket::readyRead, this, nullptr);  // One request per connection
 
-    if (request.size() < 2 || request[0] != "GET") {
-        reply(socket, "405 Method Not Allowed", "text/plain", "Only GET\n");
+    if (request.size() < 2) {
+        reply(socket, "400 Bad Request", "text/plain", "Bad request\n");
         return;
     }
+    const QByteArray method = request[0];
     const QByteArray path = request[1].split('?').first();
-    if (path == "/") {
+    if (method == "POST" && path == "/restart") {
+        GameController::instance().requestRestartFromStart();
+        reply(socket, "200 OK", "text/plain", "Restarting from the start positions\n");
+    } else if (method != "GET") {
+        reply(socket, "405 Method Not Allowed", "text/plain", "Only GET, and POST /restart\n");
+    } else if (path == "/") {
         reply(socket, "200 OK", "text/html; charset=utf-8", kPage);
     } else if (path == "/state") {
         reply(socket, "200 OK", "application/json", stateJson());

@@ -94,6 +94,7 @@ void GameController::reset() {
 
     gameElapsedTime_ = 0.0;
     lastUpdateGameTime_ = 0.0;
+    firstHalf_ = true;
 
     currentPhase_ = INITIAL;
     currentPhaseElapsedTime_ = 0.0;
@@ -109,6 +110,38 @@ void GameController::reset() {
     kickOffTeam_ = "red";
 
     handleMoveBall(0.f, 0.f);
+}
+
+// Like a referee: the game stops first, and the robots are moved once they stand still in INITIAL, so nothing they were
+// doing carries over to their start positions. The new game is a second half for the robots, as after half-time, so
+// those that relocalize at a new half start from there.
+void GameController::restartFromStart() {
+    reset();
+    firstHalf_ = false;
+    lastUpdateCurrentPhaseElapsedTime_ = simTime_;
+    lastBroadcastTime_ = -1.0;  // Tell the robots now
+    placeAtStartTime_ = simTime_ + kStopBeforePlacing;
+}
+
+// The robots and the ball hang from the world by a free joint: putting those back to qpos0, still, puts them where the
+// scene starts them. The robots' legs keep their posture, so their controllers see no jump.
+void GameController::placeAtStart() {
+    placeAtStartTime_ = -1.0;
+    if (!mujContext_ || !mujContext_->model || !mujContext_->data)
+        return;
+    const mjModel* model = mujContext_->model;
+    mjData* data = mujContext_->data;
+    for (int joint = 0; joint < model->njnt; ++joint) {
+        if (model->jnt_type[joint] != mjJNT_FREE)
+            continue;
+        mju_copy(data->qpos + model->jnt_qposadr[joint], model->qpos0 + model->jnt_qposadr[joint], 7);
+        mju_zero(data->qvel + model->jnt_dofadr[joint], 6);
+    }
+    mj_forward(model, data);
+
+    // INITIAL counts from here, so the robots get all of it at their start positions
+    currentPhaseElapsedTime_ = 0.0;
+    lastUpdateCurrentPhaseElapsedTime_ = simTime_;
 }
 
 std::map<std::string, std::string> GameController::availableCommands() const {
@@ -664,6 +697,11 @@ void GameController::update() {
     if (mujContext_ && mujContext_->data) {
         simTime_ = mujContext_->data->time;
     }
+
+    if (restartFromStartRequested_.exchange(false))
+        restartFromStart();
+    if (placeAtStartTime_ >= 0.0 && simTime_ >= placeAtStartTime_)
+        placeAtStart();
 
     if (currentPhase_ != INITIAL && currentPhase_ != FINISH) {
         // Update game time

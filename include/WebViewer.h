@@ -15,7 +15,8 @@
 namespace spqr {
 
 // A web page that shows the simulation (--web [PORT]): the viewport as an MJPEG stream and the game state, so a
-// browser on another computer can follow Circus without seeing its screen.
+// browser on another computer can follow Circus without seeing its screen. Its one control puts the robots back at
+// their start positions for a new game (POST /restart).
 class WebViewer : public QObject {
         Q_OBJECT
 
