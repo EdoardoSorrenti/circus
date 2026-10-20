@@ -24,7 +24,7 @@ namespace {
 // Up to 15 frames a second, at the viewport's own size up to Full HD
 constexpr std::chrono::milliseconds kFrameInterval(66);
 constexpr int kMaxFrameWidth = 1920;
-constexpr int kJpegQuality = 85;
+constexpr int kJpegQuality = 75;
 constexpr qint64 kMaxRequestSize = 8192;
 // Sent as one burst, a frame overflows the small buffers of a long path (a VPN from another network), and TCP then
 // slows down for the losses. Paced at this rate it goes through: 4 Mbit/s unpaced, 23 paced, on such a path.
